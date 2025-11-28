@@ -1,6 +1,8 @@
 "use client";
 
 import React, { useState } from "react";
+import { api } from "@/lib/api";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 
 export type Workout = {
   id: number;
@@ -19,6 +21,14 @@ export type Workout = {
   completion_notes?: string | null;
 };
 
+type CompleteFormPayload = {
+  workoutId: number;
+  distance?: number;
+  minutes?: number;
+  rpe?: number;
+  notes?: string;
+};
+
 export type WorkoutUpdatePayload = {
   workout_type?: string | null;
   planned_distance?: number | null;
@@ -30,6 +40,7 @@ export type WorkoutUpdatePayload = {
 type Props = {
   workout: Workout | null;
   onClose: () => void;
+  // kept for compatibility, but no longer required
   onMarkComplete?: (workout: Workout) => void | Promise<void>;
   isCompleting?: boolean;
   onSaveDetails?: (
@@ -62,8 +73,8 @@ function formatTimeSecs(secs?: number | null) {
 export default function WorkoutDrawer({
   workout,
   onClose,
-  onMarkComplete,
-  isCompleting = false,
+  onMarkComplete, // optional legacy callback
+  isCompleting,
   onSaveDetails,
   isSavingDetails = false,
 }: Props) {
@@ -73,6 +84,39 @@ export default function WorkoutDrawer({
   const [editIntensity, setEditIntensity] = useState("");
   const [editDescription, setEditDescription] = useState("");
   const [editNotes, setEditNotes] = useState("");
+
+  const [completeMode, setCompleteMode] = useState(false);
+  const [completeDistance, setCompleteDistance] = useState("");
+  const [completeMinutes, setCompleteMinutes] = useState("");
+  const [completeRpe, setCompleteRpe] = useState("");
+  const [completeNotes, setCompleteNotes] = useState("");
+
+  const queryClient = useQueryClient();
+
+  const completeMutation = useMutation({
+    mutationKey: ["workout-complete"],
+    mutationFn: async (payload: CompleteFormPayload) => {
+      const body = {
+        actual_distance:
+          typeof payload.distance === "number" ? payload.distance : null,
+        actual_time_seconds:
+          typeof payload.minutes === "number"
+            ? Math.round(payload.minutes * 60)
+            : null,
+        actual_rpe: typeof payload.rpe === "number" ? payload.rpe : null,
+        completion_notes: payload.notes ?? null,
+      };
+
+      await api.post(`/workouts/${payload.workoutId}/complete`, body);
+    },
+    onSuccess: async () => {
+      // refresh any workouts queries (month view, etc.)
+      await queryClient.invalidateQueries({
+        queryKey: ["workouts"],
+        exact: false,
+      });
+    },
+  });
 
   if (!workout) return null;
 
@@ -91,7 +135,8 @@ export default function WorkoutDrawer({
     completion_notes,
   } = workout;
 
-  // Initialize edit fields when entering edit mode
+  // ---------- edit planned details ----------
+
   function startEdit() {
     setEditType(workout_type ?? "");
     setEditDistance(
@@ -103,7 +148,7 @@ export default function WorkoutDrawer({
     setEditMode(true);
   }
 
-  async function handleSave() {
+  async function handleSaveDetails() {
     if (!onSaveDetails) {
       setEditMode(false);
       return;
@@ -141,6 +186,86 @@ export default function WorkoutDrawer({
     }
   }
 
+  // ---------- completion flow ----------
+
+  function initCompleteForm() {
+    // prefill with actual -> planned -> empty
+    if (actual_distance != null) {
+      setCompleteDistance(String(actual_distance));
+    } else if (planned_distance != null) {
+      setCompleteDistance(String(planned_distance));
+    } else {
+      setCompleteDistance("");
+    }
+
+    if (actual_time_seconds != null) {
+      setCompleteMinutes(String(Math.round(actual_time_seconds / 60)));
+    } else {
+      setCompleteMinutes("");
+    }
+
+    if (actual_rpe != null) {
+      setCompleteRpe(String(actual_rpe));
+    } else {
+      setCompleteRpe("");
+    }
+
+    setCompleteNotes(completion_notes ?? "");
+  }
+
+  async function handleMarkCompleteClick() {
+    if (!workout) return;
+
+    // first click: open the completion form
+    if (!completeMode) {
+      initCompleteForm();
+      setCompleteMode(true);
+      return;
+    }
+
+    // second click: submit
+    const distStr = completeDistance.trim();
+    const minStr = completeMinutes.trim();
+    const rpeStr = completeRpe.trim();
+    const notesStr = completeNotes.trim();
+
+    const payload: CompleteFormPayload = {
+      workoutId: workout.id,
+    };
+
+    if (distStr.length) {
+      const d = Number(distStr);
+      if (!Number.isNaN(d)) payload.distance = d;
+    }
+
+    if (minStr.length) {
+      const m = Number(minStr);
+      if (!Number.isNaN(m)) payload.minutes = m;
+    }
+
+    if (rpeStr.length) {
+      const r = Number(rpeStr);
+      if (!Number.isNaN(r)) payload.rpe = r;
+    }
+
+    if (notesStr.length) payload.notes = notesStr;
+
+    try {
+      await completeMutation.mutateAsync(payload);
+      if (onMarkComplete) {
+        await onMarkComplete(workout);
+      }
+      setCompleteMode(false);
+    } catch (err) {
+      console.error("Failed to mark workout complete", err);
+    }
+  }
+
+  const isSavingCompletion =
+    completeMutation.isPending || Boolean(isCompleting);
+
+  // ---------- render ----------
+
   return (
     <>
       {/* Overlay */}
@@ -150,7 +275,7 @@ export default function WorkoutDrawer({
         aria-hidden="true"
       />
 
-      {/* Bottom sheet with a gap from the bottom */}
+      {/* Bottom sheet with gap from bottom */}
       <div className="fixed inset-x-0 bottom-8 z-50 mx-auto max-w-lg rounded-2xl bg-white p-4 shadow-xl">
         <div className="mb-3 flex items-start justify-between">
           <div>
@@ -187,7 +312,7 @@ export default function WorkoutDrawer({
             {onSaveDetails && !completed && (
               <button
                 type="button"
-                onClick={editMode ? handleSave : startEdit}
+                onClick={editMode ? handleSaveDetails : startEdit}
                 className="inline-flex items-center rounded-full border border-neutral-300 px-3 py-1 text-xs text-neutral-700 disabled:opacity-60"
                 disabled={isSavingDetails}
               >
@@ -294,6 +419,7 @@ export default function WorkoutDrawer({
           </>
         )}
 
+        {/* Planned summary */}
         <div className="mt-2 space-y-1 rounded-md bg-neutral-50 p-2 text-xs text-neutral-700">
           <div className="font-semibold text-neutral-800">Planned</div>
           <div>
@@ -303,6 +429,53 @@ export default function WorkoutDrawer({
           {planned_intensity && <div>Intensity: {planned_intensity}</div>}
         </div>
 
+        {/* Completion form (when marking complete) */}
+        {!completed && completeMode && (
+          <div className="mt-3 space-y-2 rounded-md bg-emerald-50 p-2 text-xs text-emerald-900">
+            <div className="font-semibold">Mark as completed</div>
+            <div className="grid grid-cols-[110px,1fr] items-center gap-2">
+              <label className="text-right">Actual distance (mi)</label>
+              <input
+                className="rounded border border-emerald-300 px-2 py-1 text-xs text-emerald-900"
+                value={completeDistance}
+                onChange={(e) => setCompleteDistance(e.target.value)}
+                inputMode="decimal"
+                placeholder="e.g. 5"
+              />
+            </div>
+            <div className="grid grid-cols-[110px,1fr] items-center gap-2">
+              <label className="text-right">Time (minutes)</label>
+              <input
+                className="rounded border border-emerald-300 px-2 py-1 text-xs text-emerald-900"
+                value={completeMinutes}
+                onChange={(e) => setCompleteMinutes(e.target.value)}
+                inputMode="decimal"
+                placeholder="e.g. 42"
+              />
+            </div>
+            <div className="grid grid-cols-[110px,1fr] items-center gap-2">
+              <label className="text-right">RPE (1–10)</label>
+              <input
+                className="rounded border border-emerald-300 px-2 py-1 text-xs text-emerald-900"
+                value={completeRpe}
+                onChange={(e) => setCompleteRpe(e.target.value)}
+                inputMode="numeric"
+                placeholder="e.g. 7"
+              />
+            </div>
+            <div className="grid grid-cols-[110px,1fr] gap-2">
+              <label className="mt-1 text-right">Notes</label>
+              <textarea
+                className="min-h-[40px] rounded border border-emerald-300 px-2 py-1 text-xs text-emerald-900"
+                value={completeNotes}
+                onChange={(e) => setCompleteNotes(e.target.value)}
+                placeholder="How did it feel?"
+              />
+            </div>
+          </div>
+        )}
+
+        {/* Completed summary (read-only) */}
         {(completed ||
           actual_distance != null ||
           actual_time_seconds != null ||
@@ -336,14 +509,18 @@ export default function WorkoutDrawer({
           >
             Close
           </button>
-          {onMarkComplete && !completed && (
+          {!completed && (
             <button
               type="button"
               className="rounded bg-black px-3 py-1 text-xs font-medium text-white disabled:opacity-60"
-              onClick={() => onMarkComplete(workout)}
-              disabled={isCompleting}
+              onClick={handleMarkCompleteClick}
+              disabled={isSavingCompletion}
             >
-              {isCompleting ? "Marking…" : "Mark complete"}
+              {isSavingCompletion
+                ? "Saving…"
+                : completeMode
+                ? "Save completion"
+                : "Mark complete"}
             </button>
           )}
         </div>
